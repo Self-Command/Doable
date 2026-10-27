@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@mcp-ui/server": "^6.1.0",
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "1.29.0",
     "marked": "^15.0.0"
   },
   "engines": {

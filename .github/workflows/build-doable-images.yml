@@ -47,7 +47,9 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/build-doable-images.yml"
-      - ".github/workflows/doable-images.bake.json"
+      - "deployment/docker/Dockerfile"
+      - "pnpm-lock.yaml"
+      - "apps/web/package.json"
 
 permissions:
   contents: read
@@ -125,10 +127,63 @@ jobs:
           TAG: ${{ steps.meta.outputs.tag }}
         run: |
           set -euo pipefail
+
+          # Generate the bake definition at run time: BuildKit's JSON bake
+          # parser rejects un-declared variables, and declaring them statically
+          # in the repo would pin one namespace. A plain heredoc keeps the
+          # shared `deps`/`build` stages in a single solve so pnpm install and
+          # `next build` each run exactly once for all four targets.
+          cat > "${RUNNER_TEMP}/doable.bake.json" <<JSON
+          {
+            "group": {
+              "doable": { "targets": ["migrate", "api", "ws", "web"] }
+            },
+            "target": {
+              "doable-common": {
+                "context": ".",
+                "dockerfile": "deployment/docker/Dockerfile",
+                "platforms": ["linux/amd64"]
+              },
+              "migrate": {
+                "inherits": ["doable-common"],
+                "target": "migrate",
+                "tags": ["${PREFIX}-migrate:${TAG}", "${PREFIX}-migrate:latest"],
+                "cache-from": ["type=gha,scope=doable-deps", "type=gha,scope=doable-migrate"],
+                "cache-to": ["type=gha,mode=min,scope=doable-migrate"]
+              },
+              "api": {
+                "inherits": ["doable-common"],
+                "target": "api",
+                "tags": ["${PREFIX}-api:${TAG}", "${PREFIX}-api:latest"],
+                "cache-from": ["type=gha,scope=doable-deps", "type=gha,scope=doable-api"],
+                "cache-to": ["type=gha,mode=min,scope=doable-api"]
+              },
+              "ws": {
+                "inherits": ["doable-common"],
+                "target": "ws",
+                "tags": ["${PREFIX}-ws:${TAG}", "${PREFIX}-ws:latest"],
+                "cache-from": ["type=gha,scope=doable-deps", "type=gha,scope=doable-ws"],
+                "cache-to": ["type=gha,mode=min,scope=doable-ws"]
+              },
+              "web": {
+                "inherits": ["doable-common"],
+                "target": "web",
+                "tags": ["${PREFIX}-web:${TAG}", "${PREFIX}-web:latest"],
+                "cache-from": ["type=gha,scope=doable-deps", "type=gha,scope=doable-web"],
+                "cache-to": ["type=gha,mode=min,scope=doable-web"]
+              }
+            }
+          }
+          JSON
+
+          echo "--- generated bake file ---"
+          cat "${RUNNER_TEMP}/doable.bake.json"
+
           docker buildx bake \
-            --file .github/workflows/doable-images.bake.json \
+            --file "${RUNNER_TEMP}/doable.bake.json" \
             --push \
             doable
+
           df -h /
 
       - name: Report pushed manifests
