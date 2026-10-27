@@ -1,0 +1,238 @@
+# ==============================================================================
+# Build all four Doable runtime images entirely on GitHub-hosted runners.
+#
+# Purpose: produce ready-to-run images so a local machine never has to run a
+# multi-stage pnpm/Next.js build. Every heavy step (pnpm install for the full
+# Activepieces dependency graph, Next.js production build, Chromium install)
+# happens here and nowhere else.
+#
+# Outputs (pushed to GHCR):
+#   ghcr.io/<owner>/doable-api:<tag>
+#   ghcr.io/<owner>/doable-ws:<tag>
+#   ghcr.io/<owner>/doable-web:<tag>
+#   ghcr.io/<owner>/doable-migrate:<tag>
+# plus :latest for each, and a per-target `docker save` artifact fallback.
+#
+# Design notes:
+#   - ONE job, four sequential buildx invocations against the same builder, so
+#     the shared `deps` and `build` stages are materialised once. The upstream
+#     matrix version rebuilds them four times (separate gha cache scopes).
+#   - Disk reclamation up front: ubuntu-latest ships ~14 GB free, and the full
+#     monorepo node_modules + Chromium + NEXT build will not fit.
+#   - `mode=min` cache export keeps the gha cache under the per-repo limit.
+#   - The web image is built WITHOUT NEXT_PUBLIC_* build args so the client
+#     bundle keeps the __DOABLE_*_URL__ placeholders and the runtime entrypoint
+#     can rewrite them for any local origin.
+# ==============================================================================
+
+name: Build Doable images (fork)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to publish (defaults to <date>-<short sha>)"
+        required: false
+        default: ""
+      export_tarballs:
+        description: "Also upload docker-save tarball artifacts (registry-free install path)"
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - name: Reclaim runner disk
+        run: |
+          set -euxo pipefail
+          df -h /
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /usr/local/share/boost || true
+          sudo rm -rf /usr/share/swift || true
+          sudo rm -rf /usr/lib/jvm || true
+          sudo rm -rf /opt/microsoft || true
+          sudo rm -rf /usr/local/share/chromium || true
+          sudo rm -rf /usr/local/share/chromedriver-linux64 || true
+          sudo rm -rf /opt/google/chrome || true
+          sudo apt-get clean
+          df -h /
+          echo "free-bytes=$(df --output=avail -B1 / | tail -1)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Compute tags
+        id: meta
+        run: |
+          set -euo pipefail
+          OWNER_LC="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          SHA_SHORT="$(echo "${GITHUB_SHA}" | cut -c1-7)"
+          INPUT_TAG="${{ inputs.tag }}"
+          if [ -n "${INPUT_TAG}" ]; then
+            TAG="${INPUT_TAG}"
+          else
+            TAG="$(date -u +%Y%m%d)-${SHA_SHORT}"
+          fi
+          echo "owner=${OWNER_LC}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "prefix=${REGISTRY}/${OWNER_LC}/doable" >> "$GITHUB_OUTPUT"
+          echo "Building for owner=${OWNER_LC} tag=${TAG}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker-container
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 8
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build + push migrate
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file deployment/docker/Dockerfile \
+            --target migrate \
+            --platform linux/amd64 \
+            --push \
+            --provenance=false \
+            --cache-from type=gha,scope=deps \
+            --cache-to type=gha,mode=min,scope=deps \
+            --tag "${{ steps.meta.outputs.prefix }}-migrate:${{ steps.meta.outputs.tag }}" \
+            --tag "${{ steps.meta.outputs.prefix }}-migrate:latest" \
+            .
+          docker buildx imagetools inspect "${{ steps.meta.outputs.prefix }}-migrate:${{ steps.meta.outputs.tag }}"
+          df -h /
+
+      - name: Build + push api
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file deployment/docker/Dockerfile \
+            --target api \
+            --platform linux/amd64 \
+            --push \
+            --provenance=false \
+            --cache-from type=gha,scope=deps \
+            --cache-to type=gha,mode=min,scope=deps \
+            --tag "${{ steps.meta.outputs.prefix }}-api:${{ steps.meta.outputs.tag }}" \
+            --tag "${{ steps.meta.outputs.prefix }}-api:latest" \
+            .
+          docker buildx imagetools inspect "${{ steps.meta.outputs.prefix }}-api:${{ steps.meta.outputs.tag }}"
+          df -h /
+
+      - name: Build + push ws
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file deployment/docker/Dockerfile \
+            --target ws \
+            --platform linux/amd64 \
+            --push \
+            --provenance=false \
+            --cache-from type=gha,scope=deps \
+            --cache-to type=gha,mode=min,scope=deps \
+            --tag "${{ steps.meta.outputs.prefix }}-ws:${{ steps.meta.outputs.tag }}" \
+            --tag "${{ steps.meta.outputs.prefix }}-ws:latest" \
+            .
+          docker buildx imagetools inspect "${{ steps.meta.outputs.prefix }}-ws:${{ steps.meta.outputs.tag }}"
+          df -h /
+
+      - name: Build + push web
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file deployment/docker/Dockerfile \
+            --target web \
+            --platform linux/amd64 \
+            --push \
+            --provenance=false \
+            --cache-from type=gha,scope=deps \
+            --cache-to type=gha,mode=min,scope=deps \
+            --tag "${{ steps.meta.outputs.prefix }}-web:${{ steps.meta.outputs.tag }}" \
+            --tag "${{ steps.meta.outputs.prefix }}-web:latest" \
+            .
+          docker buildx imagetools inspect "${{ steps.meta.outputs.prefix }}-web:${{ steps.meta.outputs.tag }}"
+          df -h /
+
+      - name: Report pushed manifests
+        run: |
+          set -euo pipefail
+          {
+            echo "### Doable images built"
+            echo ""
+            echo "tag: \`${{ steps.meta.outputs.tag }}\`"
+            echo ""
+            for t in migrate api ws web; do
+              REF="${{ steps.meta.outputs.prefix }}-${t}:${{ steps.meta.outputs.tag }}"
+              DIGEST="$(docker buildx imagetools inspect "${REF}" --format '{{json .Manifest.Digest}}' 2>/dev/null || echo unknown)"
+              echo "- \`${REF}\` digest=${DIGEST}"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Try to make GHCR packages public
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          for t in migrate api ws web; do
+            echo "--- doable-$t ---"
+            gh api --method PATCH "/user/packages/container/doable-$t" -f visibility=public 2>&1 | head -c 2000 || true
+            echo
+          done
+
+      - name: Export docker-save tarballs (registry-free fallback)
+        if: ${{ inputs.export_tarballs == 'true' }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/imgs
+          for t in migrate api ws web; do
+            IMG="${{ steps.meta.outputs.prefix }}-${t}:${{ steps.meta.outputs.tag }}"
+            echo "pulling ${IMG} from registry to local daemon"
+            docker pull "${IMG}"
+          done
+          docker images --format '{{.Repository}}:{{.Tag}} {{.Size}}'
+          for t in migrate api ws web; do
+            SRC="${{ steps.meta.outputs.prefix }}-${t}:${{ steps.meta.outputs.tag }}"
+            OUT="doable-${t}-${{ steps.meta.outputs.tag }}.tar.zst"
+            echo "saving ${SRC} -> ${OUT}"
+            docker save "${SRC}" | zstd -T0 -10 -q -o "/tmp/imgs/${OUT}"
+            ls -lh "/tmp/imgs/${OUT}"
+            # stay under the 2 GiB per-asset ceiling by splitting when needed
+            split -b 1900M -d -a 3 "/tmp/imgs/${OUT}" "/tmp/imgs/${OUT}.part-"
+            rm -f "/tmp/imgs/${OUT}"
+          done
+          ls -lh /tmp/imgs | head -50
+
+      - name: Upload image tarball artifacts
+        if: ${{ inputs.export_tarballs == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: doable-images-${{ steps.meta.outputs.tag }}
+          path: /tmp/imgs/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
