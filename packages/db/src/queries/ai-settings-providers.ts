@@ -164,8 +164,25 @@ export function aiSettingsProviderQueries(sql: postgres.Sql, encryptionKey: stri
                  azure_api_version, wire_api, is_valid, added_by, created_at, updated_at,
                  preset_id, supports_tools, supports_vision, supports_mcp,
                  last_health_check, health_status, health_latency_ms,
-                 display_order, models_cache, default_timeout_ms,
-                 scope, owner_user_id
+                 display_order, default_timeout_ms,
+                 scope, owner_user_id,
+                 -- models_cache is projected to the operator-enabled subset so
+                 -- every consumer (editor picker, settings UI) sees exactly the
+                 -- models ai_provider_models marks is_enabled. The raw snapshot
+                 -- is never exposed; the two lists cannot drift apart.
+                 CASE WHEN models_cache ? 'models'
+                   THEN jsonb_set(
+                     models_cache,
+                     '{models}',
+                     (SELECT coalesce(jsonb_agg(jsonb_build_object(
+                        'id', am.model_id, 'name', am.display_name,
+                        'contextWindow', am.context_window,
+                        'supportsTools', am.supports_tools, 'supportsVision', am.supports_vision
+                      ) ORDER BY (am.supports_tools = false), am.model_id), '[]'::jsonb)
+                      FROM ai_provider_models am
+                      WHERE am.provider_id = ai_providers.id AND am.is_enabled = true))
+                   ELSE models_cache END
+                 AS models_cache
           FROM ai_providers
           WHERE workspace_id = ${workspaceId}
             AND (
@@ -180,8 +197,21 @@ export function aiSettingsProviderQueries(sql: postgres.Sql, encryptionKey: stri
                azure_api_version, wire_api, is_valid, added_by, created_at, updated_at,
                preset_id, supports_tools, supports_vision, supports_mcp,
                last_health_check, health_status, health_latency_ms,
-               display_order, models_cache, default_timeout_ms,
-               scope, owner_user_id
+               display_order, default_timeout_ms,
+               scope, owner_user_id,
+               CASE WHEN models_cache ? 'models'
+                 THEN jsonb_set(
+                   models_cache,
+                   '{models}',
+                   (SELECT coalesce(jsonb_agg(jsonb_build_object(
+                      'id', am.model_id, 'name', am.display_name,
+                      'contextWindow', am.context_window,
+                      'supportsTools', am.supports_tools, 'supportsVision', am.supports_vision
+                    ) ORDER BY (am.supports_tools = false), am.model_id), '[]'::jsonb)
+                    FROM ai_provider_models am
+                    WHERE am.provider_id = ai_providers.id AND am.is_enabled = true))
+                 ELSE models_cache END
+               AS models_cache
         FROM ai_providers
         WHERE workspace_id = ${workspaceId}
           AND scope = 'workspace'

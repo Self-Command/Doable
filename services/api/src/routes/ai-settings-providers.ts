@@ -296,11 +296,31 @@ aiSettingsProviderRoutes.post("/:workspaceId/ai-settings/providers/:id/validate"
             context_window = EXCLUDED.context_window,
             supports_tools = EXCLUDED.supports_tools,
             supports_vision = EXCLUDED.supports_vision
+            -- is_enabled is deliberately NOT updated: operator disable
+            -- decisions (models that 404 upstream, are quota-locked, or lack
+            -- tool calling) must survive re-discovery. Brand-new models
+            -- arrive with the column default (enabled).
         `;
       }
+      // models_cache is DERIVED, never authoritative: project the discovery
+      // snapshot down to the operator-enabled subset so the editor picker and
+      // ai_provider_models can never disagree. The full raw list still lives
+      // in ai_provider_models for admin re-enable flows.
       await sql`
         UPDATE ai_providers
-        SET models_cache = ${JSON.stringify({ models: result.models, discoveredAt: new Date().toISOString() })}::jsonb
+        SET models_cache = jsonb_build_object(
+          'models',
+          (SELECT coalesce(jsonb_agg(jsonb_build_object(
+              'id', am.model_id,
+              'name', am.display_name,
+              'contextWindow', am.context_window,
+              'supportsTools', am.supports_tools,
+              'supportsVision', am.supports_vision
+            ) ORDER BY (am.supports_tools = false), am.model_id), '[]'::jsonb)
+           FROM ai_provider_models am
+           WHERE am.provider_id = ai_providers.id AND am.is_enabled = true),
+          'discoveredAt', ${new Date().toISOString()}::text
+        )
         WHERE id = ${providerId}
       `;
     } catch (dbErr) {

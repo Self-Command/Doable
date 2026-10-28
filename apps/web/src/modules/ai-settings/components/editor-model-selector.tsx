@@ -272,14 +272,22 @@ export function EditorModelSelector({
                     <button
                       key={`${m.providerId}-${m.id}`}
                       onClick={() => {
+                        if (m.id.startsWith("__unconfigured__")) {
+                          router.push("/ai-settings");
+                          setOpen(false);
+                          return;
+                        }
                         onSelect(m.id, m.providerId ?? null, null);
                         setOpen(false);
                       }}
                       className={`flex w-full items-center gap-2 px-3 pl-5 py-1.5 text-sm transition-colors ${
-                        selectedModelId === m.id && selectedProviderId === m.providerId
-                          ? "bg-brand-600/20 text-brand-300"
-                          : "text-foreground hover:bg-accent"
+                        m.id.startsWith("__unconfigured__")
+                          ? "text-muted-foreground/70 cursor-pointer italic"
+                          : selectedModelId === m.id && selectedProviderId === m.providerId
+                            ? "bg-brand-600/20 text-brand-300"
+                            : "text-foreground hover:bg-accent"
                       }`}
+                      title={m.id.startsWith("__unconfigured__") ? "No enabled models for this provider yet" : undefined}
                     >
                       <span className="truncate">{m.label}</span>
                       <CapabilityBadges supportsVision={m.supportsVision} supportsTools={m.supportsTools} />

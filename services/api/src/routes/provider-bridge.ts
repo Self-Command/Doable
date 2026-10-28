@@ -76,18 +76,10 @@ providerBridgeRoutes.post("/:workspaceId/ai-settings/providers/:id/discover-mode
   const presetId = (providerData.row as unknown as Record<string, unknown>).preset_id as string | undefined;
   const models = await providerDiscovery.discoverModels(config, providerId, presetId);
 
-  // Update models_cache JSONB column
-  try {
-    await sql`
-      UPDATE ai_providers
-      SET models_cache = ${JSON.stringify({ models, discoveredAt: new Date().toISOString() })}::jsonb
-      WHERE id = ${providerId}
-    `;
-  } catch (dbErr) {
-    console.error("[ProviderBridge] Failed to update models_cache:", dbErr);
-  }
-
-  // Upsert ai_provider_models rows
+  // Upsert ai_provider_models rows FIRST (is_enabled is deliberately not
+  // touched on conflict — operator disable decisions survive re-discovery),
+  // then derive models_cache from the enabled subset. Writing the cache
+  // before the upsert would expose stale/unfiltered rows to the picker.
   try {
     for (const model of models) {
       await sql`
@@ -107,6 +99,23 @@ providerBridgeRoutes.post("/:workspaceId/ai-settings/providers/:id/discover-mode
           supports_vision = EXCLUDED.supports_vision
       `;
     }
+    await sql`
+      UPDATE ai_providers
+      SET models_cache = jsonb_build_object(
+        'models',
+        (SELECT coalesce(jsonb_agg(jsonb_build_object(
+            'id', am.model_id,
+            'name', am.display_name,
+            'contextWindow', am.context_window,
+            'supportsTools', am.supports_tools,
+            'supportsVision', am.supports_vision
+          ) ORDER BY (am.supports_tools = false), am.model_id), '[]'::jsonb)
+         FROM ai_provider_models am
+         WHERE am.provider_id = ai_providers.id AND am.is_enabled = true),
+        'discoveredAt', ${new Date().toISOString()}::text
+      )
+      WHERE id = ${providerId}
+    `;
   } catch (dbErr) {
     console.error("[ProviderBridge] Failed to upsert provider models:", dbErr);
   }

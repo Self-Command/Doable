@@ -1897,8 +1897,20 @@ function EditorPageInner() {
                 const isLocal = p.preset_id
                   ? ["ollama", "lm-studio", "llamacpp", "localai", "jan", "gpt4all", "koboldcpp", "vllm-local", "text-gen-webui"].includes(p.preset_id)
                   : (p.base_url ?? "").includes("localhost") || (p.base_url ?? "").includes("127.0.0.1");
-                // Use cached models if available, otherwise add provider as a single option
-                const cachedModels = Array.isArray(p.models_cache) ? p.models_cache : [];
+                // models_cache has TWO shapes in the wild:
+                //   - { models: [...] , discoveredAt } — the JSONB object the API
+                //     actually persists (see discover-models) and returns
+                //   - a bare legacy array — older rows
+                // The old code only handled the array shape, so the object shape
+                // always fell to the "(default)" placeholder and the picker showed
+                // a provider entry with zero selectable models.
+                const cacheShape = p.models_cache as unknown;
+                const cachedModels: Array<{ id: string; name?: string | null; supports_tools?: boolean; supports_vision?: boolean }> =
+                  Array.isArray(cacheShape)
+                    ? (cacheShape as Array<{ id: string; name?: string | null; supports_tools?: boolean; supports_vision?: boolean }>)
+                    : Array.isArray((cacheShape as { models?: unknown })?.models)
+                      ? ((cacheShape as { models: Array<{ id: string; name?: string | null; supports_tools?: boolean; supports_vision?: boolean }> }).models)
+                      : [];
                 if (cachedModels.length > 0) {
                   for (const m of cachedModels) {
                     providerOpts.push({
@@ -1915,18 +1927,21 @@ function EditorPageInner() {
                     });
                   }
                 } else {
-                  // No cached models — add a generic entry so the provider shows up
+                  // Provider exists but exposes zero enabled models. Do NOT add a
+                  // fake "(default)" entry — selecting it sends an unknown model id
+                  // upstream and fails. Surface the state instead; the selector
+                  // renders it as a disabled hint linking to AI Settings.
                   providerOpts.push({
-                    id: p.label.toLowerCase().replace(/\s+/g, "-"),
-                    label: `${p.label} (default)`,
+                    id: `__unconfigured__-${p.id}`,
+                    label: `${p.label} — no enabled models (configure in AI Settings)`,
                     group: "custom",
                     providerId: p.id,
                     providerName: p.label,
                     healthStatus: (p.health_status as ModelOption["healthStatus"]) ?? "unknown",
                     healthLatencyMs: p.health_latency_ms ?? undefined,
                     isLocal,
-                    supportsVision: p.supports_vision ?? false,
-                    supportsTools: p.supports_tools ?? true,
+                    supportsVision: false,
+                    supportsTools: false,
                   });
                 }
               }
