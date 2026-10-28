@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import { createPortal } from "react-dom";
 import { Bot, ChevronDown, ExternalLink, Lock, Eye, Wrench, Wifi } from "lucide-react";
 import { useRouter } from "next/navigation";
 
@@ -150,17 +151,49 @@ export function EditorModelSelector({
   const ref = useRef<HTMLDivElement>(null);
   const router = useRouter();
 
-  // Close on outside click
+  /**
+   * The dropdown renders through a portal at <body> with fixed positioning.
+   * The editor toolbar wraps this component in an `overflow-hidden` container
+   * (needed to clip attachment thumbnails on narrow screens), which otherwise
+   * clips the absolutely-positioned dropdown entirely — the button "clicks"
+   * but no panel ever appears. Portaling escapes every ancestor clip.
+   */
+  const [panelPos, setPanelPos] = useState<{ top: number; left: number; bottomUp: boolean } | null>(null);
+
+  const syncPosition = useCallback(() => {
+    const btn = ref.current;
+    if (!btn) return;
+    const r = btn.getBoundingClientRect();
+    // Prefer opening upward (chat toolbar sits at the bottom of the viewport);
+    // fall back to downward when there is more room above than 360px allows.
+    const spaceAbove = r.top;
+    const PANEL_MAX_H = 320; // max-h-80
+    const bottomUp = spaceAbove > PANEL_MAX_H + 16;
+    const top = bottomUp ? r.top - 4 : r.bottom + 4;
+    const left = Math.max(8, Math.min(r.left, (typeof window !== "undefined" ? window.innerWidth : 1280) - 272));
+    setPanelPos({ top, left, bottomUp });
+  }, []);
+
   useEffect(() => {
     if (!open) return;
+    syncPosition();
     const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
+      // Clicks inside the anchored button OR the portaled panel keep it open.
+      const target = e.target as Node;
+      if (ref.current?.contains(target)) return;
+      if (document.getElementById("doable-model-selector-panel")?.contains(target)) return;
+      setOpen(false);
     };
+    const onScrollOrResize = () => syncPosition();
     document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [open]);
+    window.addEventListener("scroll", onScrollOrResize, true);
+    window.addEventListener("resize", onScrollOrResize);
+    return () => {
+      document.removeEventListener("mousedown", handler);
+      window.removeEventListener("scroll", onScrollOrResize, true);
+      window.removeEventListener("resize", onScrollOrResize);
+    };
+  }, [open, syncPosition]);
 
   const allModels = models.length > 0 ? models : DEFAULT_MODELS;
   const copilotModels = allModels.filter((m) => m.group === "copilot");
@@ -183,19 +216,17 @@ export function EditorModelSelector({
 
   const displayLabel = selectedModelId || "Auto";
 
-  return (
-    <div className="relative" ref={ref}>
-      <button
-        onClick={() => setOpen(!open)}
-        className="flex items-center gap-1.5 rounded-full border border-border px-2.5 h-7 text-[12px] text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors"
+  const panel =
+    open && panelPos ? (
+      <div
+        id="doable-model-selector-panel"
+        className="fixed z-[9999] w-64 max-h-80 overflow-y-auto rounded-lg border border-border bg-popover shadow-xl py-1"
+        style={
+          panelPos.bottomUp
+            ? { bottom: typeof window !== "undefined" ? window.innerHeight - panelPos.top : 0, left: panelPos.left }
+            : { top: panelPos.top, left: panelPos.left }
+        }
       >
-        <Bot className="h-3 w-3" />
-        <span className="max-w-[100px] truncate">{displayLabel}</span>
-        <ChevronDown className="h-3 w-3" />
-      </button>
-
-      {open && (
-        <div className="absolute bottom-full mb-1 left-0 z-50 w-64 max-h-80 overflow-y-auto rounded-lg border border-border bg-popover shadow-xl py-1">
           {/* Copilot Models */}
           <div className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
             Copilot Models
@@ -271,8 +302,21 @@ export function EditorModelSelector({
             <ExternalLink className="h-3 w-3" />
             Manage AI Settings
           </button>
-        </div>
-      )}
+      </div>
+    ) : null;
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={() => setOpen(!open)}
+        className="flex items-center gap-1.5 rounded-full border border-border px-2.5 h-7 text-[12px] text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors"
+      >
+        <Bot className="h-3 w-3" />
+        <span className="max-w-[100px] truncate">{displayLabel}</span>
+        <ChevronDown className="h-3 w-3" />
+      </button>
+
+      {typeof document !== "undefined" && createPortal(panel, document.body)}
     </div>
   );
 }
